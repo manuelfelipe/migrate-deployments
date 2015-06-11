@@ -2,9 +2,7 @@
 
 require 'optparse'
 require 'json'
-require 'pry'
 require 'right_api_client'
-require 'pry-debugger'
 
 @options = {}
 @server_templates = {}
@@ -109,7 +107,8 @@ end
 
 # ------ Create a new deployment in the dst account -----
 def create_deployment
-  @api.account_id = @options[:dst]
+  @api.account_id = @options[:src]
+  inputs = format_inputs(@old_deployment.show.inputs)
 
   params = {
     :deployment => {
@@ -123,6 +122,12 @@ def create_deployment
   @api.account_id = @options[:dst]
   result = @api.deployments.create(params)
   @new_deployment = result.href
+
+  # Set deployment level inputs. Cannot set them at create time, so do it now
+  deployment = @api.resource(@new_deployment)
+  deployment_inputs = {}
+  deployment_inputs[:inputs] = inputs
+  deployment.inputs.multi_update(deployment_inputs)
 end
 
 # ----- Recreate existing servers from old deployment in new account -----
@@ -131,44 +136,27 @@ def create_servers
   old_deployment = JSON.parse(`rsc -a #{@options[:src]} cm16 show /api/deployments/#{@options[:deployment]} view=full`)
 
   old_deployment['servers'].each do |server|
-    @api.account_id = @options[:src]
+    @api.account_id  = @options[:src]
     name             = server['next_instance']['name']
 
     puts "Creating server: #{name} ...\n"
 
     cloud            = find_cloud(server['next_instance']['links']['cloud']['href'], name)
-    @api.account_id = @options[:src]
+    @api.account_id  = @options[:src]
 
     ssh_key          = find_ssh_key(cloud, server['next_instance']['links']['ssh_key'], name)
-    @api.account_id = @options[:src]
+    @api.account_id  = @options[:src]
 
     instance_type    = choose_instance_type(cloud)
     old_st_url       = server['next_instance']['server_template']['href']
     new_st_url       = @server_templates[old_st_url]['new_st_url']
     
     mci              = choose_mci(new_st_url)
-    @api.account_id = @options[:src]
+    @api.account_id  = @options[:src]
 
-    inputs           = @api.resource(server['next_instance']['href']).show.inputs
-    inputs_hash      = {}
+    inputs_hash      = format_inputs(@api.resource(server['next_instance']['href']).show.inputs)
     
     # create input key/value pairs
-    @api.account_id = @options[:src]
-    inputs.index.each do |input|
-      # Array input format type isn't correct and must be changed to a json array.
-      # More info here: http://reference.rightscale.com/api1.5/resources/ResourceInputs.html#multi_update
-      if input.value =~ /^array:/
-        array = input.value.sub(/^array:/, "").split(",")
-        array.map {|a| a.sub!(/^/, "\"text:").sub!(/$/, "\"")}
-        new_array = array.join(",")
-        new_array.sub!(/^/, "array:[")
-        new_array.sub!(/$/, "]")
-        inputs_hash[input.name] = new_array
-      else
-        inputs_hash[input.name] = input.value
-      end
-    end
-
     # Create server
     params = {}
     params[:server] = {}
@@ -181,7 +169,7 @@ def create_servers
     params[:server][:instance][:instance_type_href] = instance_type
     params[:server][:instance][:multi_cloud_image_href] = mci
     params[:server][:instance][:inputs] = inputs_hash
-      
+
     @api.account_id = @options[:dst]
     @api.servers.create(params)
   end
@@ -275,4 +263,28 @@ def choose_instance_type(new_cloud)
   return instance_types.index[gets.chomp.to_i].href
 end
 
+# ----- Convert Input key/value pairs to hash -----
+def format_inputs(inputs)
+  @api.account_id = @options[:src]
+  result = {}
+
+  inputs.index.each do |input|
+    # Array input format type isn't correct and must be changed to a json array.
+    # More info here: http://reference.rightscale.com/api1.5/resources/ResourceInputs.html#multi_update
+    if input.value =~ /^array:/
+      array = input.value.sub(/^array:/, "").split(",")
+      array.map {|a| a.sub!(/^/, "\"text:").sub!(/$/, "\"")}
+      new_array = array.join(",")
+      new_array.sub!(/^/, "array:[")
+      new_array.sub!(/$/, "]")
+      result[input.name] = new_array
+    else
+      result[input.name] = input.value
+    end
+  end
+  
+  return result
+end
+
 main()
+
